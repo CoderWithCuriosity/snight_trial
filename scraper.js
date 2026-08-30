@@ -4,7 +4,7 @@ const path = require('path');
 
 async function scrapeLiveMatches() {
     const browser = await puppeteer.launch({
-        headless: false,
+        headless: true,
         defaultViewport: {
             width: 760,
             height: 800
@@ -84,29 +84,6 @@ async function scrapeLiveMatches() {
             return await page.evaluate(() => {
                 const matches = [];
 
-                const toSlug = (text) => {
-                    return text
-                        .replace(/[\/\s]+/g, '_')
-                        .trim();
-                };
-
-                const extractLeague = (text) => {
-                    const parts = text.split(' - ');
-                    if (parts.length === 2) {
-                        return [parts[0].trim(), parts[1].trim()];
-                    }
-                    return ['Unknown', text.trim()];
-                };
-
-                const formatLeague = (text) => {
-                    const parts = text.split(' - ');
-                    const clean = (str) => str.trim().replace(/\s+/g, '_');
-                    if (parts.length === 2) {
-                        return `${clean(parts[0].trim())}/${clean(parts[1].trim())}`;
-                    }
-                    return text.trim();
-                };
-
                 // Valid live statuses - matches that are currently playing
                 const LIVE_STATUSES = ['H1', 'H2', 'HT', 'ET', 'PEN', '2H', '1H', 'Half Time', 'Extra Time'];
 
@@ -145,16 +122,12 @@ async function scrapeLiveMatches() {
                     const homeTeam = teamElements[0]?.textContent?.trim() || 'Unknown';
                     const awayTeam = teamElements[1]?.textContent?.trim() || 'Unknown';
 
-                    // Get league name
-                    const leagueElement = element.querySelector('.m-league-name');
-                    const league = leagueElement?.textContent?.trim() || 'Unknown';
-
                     // Get scores
                     const scoreElements = element.querySelectorAll('.score .set-score');
                     const homeScore = scoreElements[0]?.textContent?.trim() || '0';
                     const awayScore = scoreElements[1]?.textContent?.trim() || '0';
 
-                    // Get odds
+                    // Get odds (1X2)
                     const oddsElements = element.querySelectorAll('.market-id-1 .m-outcome-odds .m-odds-value');
                     const odds = {
                         home: oddsElements[0]?.textContent?.trim() || null,
@@ -162,37 +135,28 @@ async function scrapeLiveMatches() {
                         away: oddsElements[2]?.textContent?.trim() || null
                     };
 
+                    // Check for STV and SFM
                     const hasSTV = !!element.querySelector('.stv-icon');
                     const hasSFM = !!element.querySelector('.sfm-icon');
 
+                    // Get market size
                     const marketSizeElement = element.querySelector('.m-market-size');
                     const marketSize = marketSizeElement?.textContent?.trim() || '0';
 
+                    // Get labels
                     const labels = [];
                     const labelElements = element.querySelectorAll('.label .label-text');
                     labelElements.forEach(label => {
                         labels.push(label.textContent.trim());
                     });
 
-                    const [country, leagueName] = extractLeague(league);
-                    const homeslug = toSlug(homeTeam);
-                    const awayslug = toSlug(awayTeam);
-                    const leagueClean = formatLeague(league);
-
                     const matchId = matchKey.replace('sr:match:', '');
-                    const matchUrl = `https://www.sportybet.com/ng/m/sport/football/${leagueClean}/${homeslug}_vs_${awayslug}/${matchKey}`;
-                    const resultUrl = `https://www.sportybet.com/ng/m/sport/football/live/${leagueClean}/${homeslug}_vs_${awayslug}/${matchKey}`;
-
-                    if (country === "Simulated Reality League") return;
 
                     matches.push({
                         matchKey: matchKey,
                         matchId: matchId,
                         homeTeam: homeTeam,
                         awayTeam: awayTeam,
-                        league: league,
-                        country: country,
-                        leagueName: leagueName,
                         time: time,
                         status: status,
                         homeScore: homeScore,
@@ -202,9 +166,7 @@ async function scrapeLiveMatches() {
                         hasSTV: hasSTV,
                         hasSFM: hasSFM,
                         labels: labels,
-                        marketSize: marketSize,
-                        matchUrl: matchUrl,
-                        resultUrl: resultUrl
+                        marketSize: marketSize
                     });
                 });
 
@@ -315,13 +277,12 @@ async function scrapeLiveMatches() {
         // Display matches in a readable format
         uniqueMatches.forEach((m, index) => {
             console.log(`${index + 1}. ${m.homeTeam} ${m.homeScore} - ${m.awayScore} ${m.awayTeam}`);
-            console.log(`   ${m.status} ${m.time} | ${m.league}`);
-            console.log(`   Odds: ${m.odds.home} | ${m.odds.draw} | ${m.odds.away}`);
-            console.log(`   URL: ${m.matchUrl}`);
+            console.log(`   ${m.status} ${m.time} | Odds: ${m.odds.home} | ${m.odds.draw} | ${m.odds.away}`);
+            console.log(`   Labels: ${m.labels.join(', ') || 'None'}`);
             console.log('');
         });
 
-        // Save data (optional)
+        // Save data
         const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
         const dataDir = path.join(__dirname, 'data');
         fs.mkdirSync(dataDir, { recursive: true });
