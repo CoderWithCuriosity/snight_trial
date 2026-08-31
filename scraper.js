@@ -1,6 +1,70 @@
 const puppeteer = require('puppeteer');
 const fs = require('fs');
 const path = require('path');
+const axios = require('axios');
+
+// Nigerian timezone
+const NIGERIA_TIMEZONE = 'Africa/Lagos';
+
+// Track sent matches
+const SENT_MATCHES_FILE = path.join(__dirname, 'sent_matches.json');
+let sentMatchIds = new Set();
+
+// Save sent matches
+function saveSentMatches() {
+    try {
+        const data = JSON.stringify([...sentMatchIds]);
+        fs.writeFileSync(SENT_MATCHES_FILE, data);
+    } catch (error) {
+        console.error(`[${getNigeriaTime()}] Error saving sent matches:`, error.message);
+    }
+}
+
+// Add match to sent list
+function markMatchAsSent(matchId) {
+    sentMatchIds.add(matchId);
+    saveSentMatches();
+}
+
+// Check if match was already sent
+function isMatchAlreadySent(matchId) {
+    return sentMatchIds.has(matchId);
+}
+
+// Telegram Configuration
+const BOT_TOKEN = '8804191374:AAFfsRgka7LEno_k-6CWUS8m-8otGt5PItM';
+const USER_ID = '-5513202747';
+
+function getNigeriaTime() {
+    return new Date().toLocaleString('en-US', { timeZone: NIGERIA_TIMEZONE });
+}
+
+function getNigeriaDate() {
+    return new Date().toLocaleDateString('en-US', { timeZone: NIGERIA_TIMEZONE });
+}
+
+async function sendTelegramMessage(message) {
+    try {
+        const url = `https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`;
+
+        await axios.post(url, {
+            chat_id: USER_ID,
+            text: message,
+            parse_mode: "HTML"
+        });
+
+        console.log(`[${getNigeriaTime()}] Telegram notification sent`);
+
+    } catch (error) {
+        console.error(`[${getNigeriaTime()}] Telegram error:`, error.response?.data || error.message);
+    }
+}
+
+// Check if match is simulated (SRL)
+function isSimulatedMatch(homeTeam, awayTeam) {
+    const srlPattern = /\bSRL\b/i;
+    return srlPattern.test(homeTeam) || srlPattern.test(awayTeam);
+}
 
 async function scrapeLiveMatches() {
     const browser = await puppeteer.launch({
@@ -12,10 +76,13 @@ async function scrapeLiveMatches() {
         args: [
             '--no-sandbox',
             '--disable-setuid-sandbox',
-            '--disable-blink-features=AutomationControlled'
+            '--disable-blink-features=AutomationControlled',
+            '--disable-dev-shm-usage',
+            '--disable-gpu',
+            '--memory-pressure-off'
         ]
     });
-    
+
     let page = null;
     const start = Date.now();
 
@@ -24,16 +91,13 @@ async function scrapeLiveMatches() {
 
         await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
 
-        // Go to the live matches page
         await page.goto('https://www.sportybet.com/ng/m/sport/football/live_list?source=home_list', {
             waitUntil: 'domcontentloaded',
             timeout: 60000
         });
 
-        // Wait for matches to load
         await page.waitForSelector('.m-event-live, .m-live-row', { timeout: 30000 });
 
-        // Function to check if loading is present
         async function isLoadingPresent() {
             return await page.evaluate(() => {
                 const loadingSelectors = [
@@ -58,7 +122,6 @@ async function scrapeLiveMatches() {
             });
         }
 
-        // Function to wait for loading to disappear
         async function waitForLoadingToDisappear() {
             await page.waitForFunction(
                 () => {
@@ -76,30 +139,25 @@ async function scrapeLiveMatches() {
                     return true;
                 },
                 { timeout: 3000, polling: 500 }
-            ).catch(() => {});
+            ).catch(() => { });
         }
 
-        // Function to extract live matches from current page state
         async function getCurrentLiveMatches() {
             return await page.evaluate(() => {
                 const matches = [];
 
-                // Valid live statuses - matches that are currently playing
                 const LIVE_STATUSES = ['H1', 'H2', 'HT', 'ET', 'PEN', '2H', '1H', 'Half Time', 'Extra Time'];
 
-                // Find all match elements
                 const elements = document.querySelectorAll('[data-key^="sr:match:"]');
 
                 elements.forEach(element => {
                     const matchKey = element.getAttribute('data-key');
                     if (!matchKey || !matchKey.startsWith('sr:match:')) return;
 
-                    // Get match status
                     const statusElement = element.querySelector('.match-status');
                     const status = statusElement?.textContent?.trim() || '';
 
-                    // Check if this is actually LIVE
-                    const isActuallyLive = LIVE_STATUSES.some(liveStatus => 
+                    const isActuallyLive = LIVE_STATUSES.some(liveStatus =>
                         status.includes(liveStatus) || status === liveStatus
                     );
 
@@ -112,22 +170,18 @@ async function scrapeLiveMatches() {
                     const timeElement = element.querySelector('.m-event-time');
                     const time = timeElement?.textContent?.trim() || '';
 
-                    // Skip if not live
                     if (!isActuallyLive && !hasLiveIndicator) {
                         return;
                     }
 
-                    // Get team names
                     const teamElements = element.querySelectorAll('.m-info-cell .team');
                     const homeTeam = teamElements[0]?.textContent?.trim() || 'Unknown';
                     const awayTeam = teamElements[1]?.textContent?.trim() || 'Unknown';
 
-                    // Get scores
                     const scoreElements = element.querySelectorAll('.score .set-score');
                     const homeScore = scoreElements[0]?.textContent?.trim() || '0';
                     const awayScore = scoreElements[1]?.textContent?.trim() || '0';
 
-                    // Get odds (1X2)
                     const oddsElements = element.querySelectorAll('.market-id-1 .m-outcome-odds .m-odds-value');
                     const odds = {
                         home: oddsElements[0]?.textContent?.trim() || null,
@@ -135,15 +189,12 @@ async function scrapeLiveMatches() {
                         away: oddsElements[2]?.textContent?.trim() || null
                     };
 
-                    // Check for STV and SFM
                     const hasSTV = !!element.querySelector('.stv-icon');
                     const hasSFM = !!element.querySelector('.sfm-icon');
 
-                    // Get market size
                     const marketSizeElement = element.querySelector('.m-market-size');
                     const marketSize = marketSizeElement?.textContent?.trim() || '0';
 
-                    // Get labels
                     const labels = [];
                     const labelElements = element.querySelectorAll('.label .label-text');
                     labelElements.forEach(label => {
@@ -174,44 +225,34 @@ async function scrapeLiveMatches() {
             });
         }
 
-        // Function to get all matches with scrolling
         async function scrollAndExtractLiveMatches() {
             let allMatches = [];
             let previousCount = 0;
             let noNewMatches = 0;
 
-            // Get initial matches
             allMatches = await getCurrentLiveMatches();
-            console.log(`Found ${allMatches.length} live matches so far...`);
+            console.log(`[${getNigeriaTime()}] Found ${allMatches.length} live matches so far...`);
 
-            // Keep scrolling until no new matches appear
             while (true) {
-                // Check if loading is present and wait
                 if (await isLoadingPresent()) {
                     await waitForLoadingToDisappear();
                 }
 
-                // Scroll down
                 await page.evaluate(() => {
                     window.scrollBy(0, window.innerHeight * 0.8);
                 });
 
-                // Wait a bit for new content to load
                 await new Promise(resolve => setTimeout(resolve, 1500));
 
-                // Check for loading after scroll
                 if (await isLoadingPresent()) {
                     await waitForLoadingToDisappear();
                 }
 
-                // Get current matches
                 const currentMatches = await getCurrentLiveMatches();
 
-                // Merge with existing matches (avoid duplicates)
                 const seen = new Set();
                 const mergedMatches = [];
 
-                // Add existing matches first
                 for (let match of allMatches) {
                     if (!seen.has(match.matchKey)) {
                         seen.add(match.matchKey);
@@ -219,7 +260,6 @@ async function scrapeLiveMatches() {
                     }
                 }
 
-                // Add new matches
                 for (let match of currentMatches) {
                     if (!seen.has(match.matchKey)) {
                         seen.add(match.matchKey);
@@ -227,7 +267,6 @@ async function scrapeLiveMatches() {
                     }
                 }
 
-                // Check if we got new matches
                 if (mergedMatches.length === previousCount) {
                     noNewMatches++;
                 } else {
@@ -237,9 +276,8 @@ async function scrapeLiveMatches() {
                 previousCount = mergedMatches.length;
                 allMatches = mergedMatches;
 
-                console.log(`Found ${allMatches.length} live matches total...`);
+                console.log(`[${getNigeriaTime()}] Found ${allMatches.length} live matches total...`);
 
-                // Check if we've reached the bottom
                 const reachedBottom = await page.evaluate(() => {
                     const bottomNav = document.querySelector('.m-bottom-nav, .m-footer');
                     if (!bottomNav) return false;
@@ -248,7 +286,6 @@ async function scrapeLiveMatches() {
                     return rect.top <= window.innerHeight;
                 });
 
-                // Stop if we've reached the bottom or no new matches after 3 attempts
                 if (reachedBottom || noNewMatches >= 3) {
                     console.log(reachedBottom ? 'Reached bottom of page' : 'No new matches found');
                     break;
@@ -258,10 +295,8 @@ async function scrapeLiveMatches() {
             return allMatches;
         }
 
-        // Get all live matches with scrolling
         const allLiveMatches = await scrollAndExtractLiveMatches();
 
-        // Remove duplicates one final time
         const seen = new Set();
         const uniqueMatches = [];
         for (let match of allLiveMatches) {
@@ -271,10 +306,9 @@ async function scrapeLiveMatches() {
             }
         }
 
-        console.log(`\n=== FINAL RESULTS ===`);
+        console.log(`\n[${getNigeriaTime()}] === FINAL RESULTS ===`);
         console.log(`Total live matches found: ${uniqueMatches.length}`);
 
-        // Display matches in a readable format
         uniqueMatches.forEach((m, index) => {
             console.log(`${index + 1}. ${m.homeTeam} ${m.homeScore} - ${m.awayScore} ${m.awayTeam}`);
             console.log(`   ${m.status} ${m.time} | Odds: ${m.odds.home} | ${m.odds.draw} | ${m.odds.away}`);
@@ -282,14 +316,13 @@ async function scrapeLiveMatches() {
             console.log('');
         });
 
-        // Save data
-        const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+        const nigeriaDate = getNigeriaDate().replace(/\//g, '-');
         const dataDir = path.join(__dirname, 'data');
         fs.mkdirSync(dataDir, { recursive: true });
 
-        const jsonFilename = path.join(dataDir, `live_matches_${timestamp}.json`);
+        const jsonFilename = path.join(dataDir, `live_matches_${nigeriaDate}.json`);
         fs.writeFileSync(jsonFilename, JSON.stringify(uniqueMatches, null, 2));
-        console.log(`\nData saved to: ${jsonFilename}`);
+        console.log(`\n[${getNigeriaTime()}] Data saved to: ${jsonFilename}`);
 
         return uniqueMatches;
 
@@ -300,17 +333,171 @@ async function scrapeLiveMatches() {
         throw error;
     } finally {
         const end = Date.now();
-        console.log(`Scraping took ${end - start} ms`);
+        console.log(`[${getNigeriaTime()}] Scraping took ${end - start} ms`);
         await browser.close();
     }
 }
 
-// Run the scraper
-scrapeLiveMatches()
-    .then(matches => {
-        console.log(`\nSuccessfully scraped ${matches.length} live matches`);
-    })
-    .catch(error => {
-        console.error('Scraping failed:', error);
-        process.exit(1);
-    });
+// Main function that runs every 5 minutes
+async function runForever() {
+    console.log(`[${getNigeriaTime()}] Starting SportyBet Live Match Scraper (Nigeria Time)`);
+    console.log(`[${getNigeriaTime()}] Will run every 5 minutes with browser restart to prevent memory leaks\n`);
+
+    let runCount = 0;
+    let previousMatches = [];
+
+    while (true) {
+        try {
+            runCount++;
+            console.log(`\n[${getNigeriaTime()}] Run #${runCount} starting...`);
+
+            const currentMatches = await scrapeLiveMatches();
+
+            const realMatches = currentMatches.filter(match => {
+                return !isSimulatedMatch(match.homeTeam, match.awayTeam);
+            });
+
+            // Find matches where time is empty but marketSize is not empty
+            // This means they haven't started yet but have odds available
+            const matchesToNotify = realMatches.filter(match => {
+                return match.time === '' && match.marketSize !== '0' && match.marketSize !== '';
+            });
+
+            // Also find matches that are in progress (have time and marketSize)
+            const inProgressMatches = realMatches.filter(match => {
+                return match.time !== '' && match.marketSize !== '0' && match.marketSize !== '';
+            });
+
+            // Also find matches that are finished (time might be empty but status indicates finished)
+            const finishedMatches = realMatches.filter(match => {
+                return match.status === 'FT' || match.status === 'AET' || match.status === 'PEN';
+            });
+
+            // Find new matches that weren't in previous scrape
+            const previousMatchKeys = new Set(previousMatches.map(m => m.matchKey));
+            const newMatches = realMatches.filter(m => !previousMatchKeys.has(m.matchKey));
+
+            // Send notifications for matches that meet criteria
+            if (matchesToNotify.length > 0) {
+                let newMatchesToNotify = matchesToNotify.filter(match => !isMatchAlreadySent(match.matchId));
+
+                if (newMatchesToNotify.length > 0) {
+                    console.log(`[${getNigeriaTime()}] Found ${newMatchesToNotify.length} new matches to notify (${matchesToNotify.length - newMatchesToNotify.length} already sent)`);
+
+                    for (const match of newMatchesToNotify) {
+                        const oddsText = match.odds.home && match.odds.draw && match.odds.away
+                            ? `Home: ${match.odds.home} | Draw: ${match.odds.draw} | Away: ${match.odds.away}`
+                            : 'No odds available';
+
+                        const message =
+                            `<b>Match: ${match.homeTeam} vs ${match.awayTeam}</b>\n` +
+                            `Status: ${match.status}\n` +
+                            `Market Size: ${match.marketSize}\n` +
+                            `Odds: ${oddsText}\n` +
+                            `Match ID: ${match.matchId}\n` +
+                            `Time: ${getNigeriaTime()}`;
+
+                        await sendTelegramMessage(message);
+
+                        // Mark as sent after successful send
+                        markMatchAsSent(match.matchId);
+
+                        // Small delay to avoid rate limiting
+                        await new Promise(resolve => setTimeout(resolve, 200));
+                    }
+                }
+            }
+
+            // Send notifications for in-progress matches
+            if (inProgressMatches.length > 0) {
+                let newInProgressMatches = inProgressMatches.filter(match => !isMatchAlreadySent(match.matchId));
+
+                if (newInProgressMatches.length > 0) {
+                    console.log(`[${getNigeriaTime()}] Found ${newInProgressMatches.length} new in-progress matches to notify (${inProgressMatches.length - newInProgressMatches.length} already sent)`);
+
+                    for (const match of newInProgressMatches) {
+                        const oddsText = match.odds.home && match.odds.draw && match.odds.away
+                            ? `Home: ${match.odds.home} | Draw: ${match.odds.draw} | Away: ${match.odds.away}`
+                            : 'No odds available';
+
+                        const labelsText = match.labels.length > 0 ? `Labels: ${match.labels.join(', ')}` : '';
+
+                        let message =
+                            `<b>Live: ${match.homeTeam} ${match.homeScore} - ${match.awayScore} ${match.awayTeam}</b>\n` +
+                            `Time: ${match.time} | Status: ${match.status}\n` +
+                            `Market Size: ${match.marketSize}\n` +
+                            `Odds: ${oddsText}\n`;
+
+                        if (labelsText) message += `${labelsText}\n`;
+                        message += `Match ID: ${match.matchId}\n`;
+                        message += `Time: ${getNigeriaTime()}`;
+
+                        await sendTelegramMessage(message);
+
+                        // Mark as sent after successful send
+                        markMatchAsSent(match.matchId);
+
+                        // Small delay to avoid rate limiting
+                        await new Promise(resolve => setTimeout(resolve, 200));
+                    }
+                }
+            }
+            // Send notifications for new matches
+            if (newMatches.length > 0) {
+                let brandNewMatches = newMatches.filter(match => !isMatchAlreadySent(match.matchId));
+
+                if (brandNewMatches.length > 0) {
+                    console.log(`[${getNigeriaTime()}] Found ${brandNewMatches.length} brand new matches to notify (${newMatches.length - brandNewMatches.length} already sent)`);
+
+                    for (const match of brandNewMatches) {
+                        const oddsText = match.odds.home && match.odds.draw && match.odds.away
+                            ? `Home: ${match.odds.home} | Draw: ${match.odds.draw} | Away: ${match.odds.away}`
+                            : 'No odds available';
+
+                        const message =
+                            `<b>New Match: ${match.homeTeam} vs ${match.awayTeam}</b>\n` +
+                            `Status: ${match.status}\n` +
+                            `Time: ${match.time || 'Not started'}\n` +
+                            `Odds: ${oddsText}\n` +
+                            `Match ID: ${match.matchId}\n` +
+                            `Time: ${getNigeriaTime()}`;
+
+                        await sendTelegramMessage(message);
+
+                        // Mark as sent after successful send
+                        markMatchAsSent(match.matchId);
+
+                        // Small delay to avoid rate limiting
+                        await new Promise(resolve => setTimeout(resolve, 200));
+                    }
+                }
+            }
+
+            // Send a summary notification
+            if (matchesToNotify.length > 0 || inProgressMatches.length > 0 || newMatches.length > 0) {
+                console.log(`[${getNigeriaTime()}] Sent notifications for ${matchesToNotify.length + inProgressMatches.length + newMatches.length} matches`);
+            } else {
+                console.log(`[${getNigeriaTime()}] No new matches to notify`);
+            }
+
+            // Update previous matches for next comparison
+            previousMatches = currentMatches;
+
+            console.log(`[${getNigeriaTime()}] Run #${runCount} completed successfully!`);
+            console.log(`[${getNigeriaTime()}] Total matches: ${currentMatches.length}`);
+
+        } catch (error) {
+            console.error(`[${getNigeriaTime()}] Error in run #${runCount}:`, error.message);
+        }
+
+        // Wait 5 minutes before next run
+        console.log(`[${getNigeriaTime()}] Waiting 5 minutes until next run...`);
+        await new Promise(resolve => setTimeout(resolve, 5 * 60 * 1000)); // 5 minutes
+    }
+}
+
+// Start the forever loop
+runForever().catch(error => {
+    console.error('Fatal error:', error);
+    process.exit(1);
+});
