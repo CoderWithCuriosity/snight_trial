@@ -309,13 +309,6 @@ async function scrapeLiveMatches() {
         console.log(`\n[${getNigeriaTime()}] === FINAL RESULTS ===`);
         console.log(`Total live matches found: ${uniqueMatches.length}`);
 
-        uniqueMatches.forEach((m, index) => {
-            console.log(`${index + 1}. ${m.homeTeam} ${m.homeScore} - ${m.awayScore} ${m.awayTeam}`);
-            console.log(`   ${m.status} ${m.time} | Odds: ${m.odds.home} | ${m.odds.draw} | ${m.odds.away}`);
-            console.log(`   Labels: ${m.labels.join(', ') || 'None'}`);
-            console.log('');
-        });
-
         const nigeriaDate = getNigeriaDate().replace(/\//g, '-');
         const dataDir = path.join(__dirname, 'data');
         fs.mkdirSync(dataDir, { recursive: true });
@@ -344,7 +337,6 @@ async function runForever() {
     console.log(`[${getNigeriaTime()}] Will run every 5 minutes with browser restart to prevent memory leaks\n`);
 
     let runCount = 0;
-    let previousMatches = [];
 
     while (true) {
         try {
@@ -353,135 +345,46 @@ async function runForever() {
 
             const currentMatches = await scrapeLiveMatches();
 
+            // Filter out simulated matches
             const realMatches = currentMatches.filter(match => {
                 return !isSimulatedMatch(match.homeTeam, match.awayTeam);
             });
 
-            // Find matches where time is empty but marketSize is not empty
-            // This means they haven't started yet but have odds available
+            // Only get matches with empty time and non-empty market size
             const matchesToNotify = realMatches.filter(match => {
                 return match.time === '' && match.marketSize !== '0' && match.marketSize !== '';
             });
 
-            // Also find matches that are in progress (have time and marketSize)
-            const inProgressMatches = realMatches.filter(match => {
-                return match.time !== '' && match.marketSize !== '0' && match.marketSize !== '';
-            });
+            // Filter out already sent matches
+            const newMatchesToNotify = matchesToNotify.filter(match => !isMatchAlreadySent(match.matchId));
 
-            // Also find matches that are finished (time might be empty but status indicates finished)
-            const finishedMatches = realMatches.filter(match => {
-                return match.status === 'FT' || match.status === 'AET' || match.status === 'PEN';
-            });
+            if (newMatchesToNotify.length > 0) {
+                console.log(`[${getNigeriaTime()}] Found ${newMatchesToNotify.length} new matches to notify`);
 
-            // Find new matches that weren't in previous scrape
-            const previousMatchKeys = new Set(previousMatches.map(m => m.matchKey));
-            const newMatches = realMatches.filter(m => !previousMatchKeys.has(m.matchKey));
+                for (const match of newMatchesToNotify) {
+                    const oddsText = match.odds.home && match.odds.draw && match.odds.away
+                        ? `Home: ${match.odds.home} | Draw: ${match.odds.draw} | Away: ${match.odds.away}`
+                        : 'No odds available';
 
-            // Send notifications for matches that meet criteria
-            if (matchesToNotify.length > 0) {
-                let newMatchesToNotify = matchesToNotify.filter(match => !isMatchAlreadySent(match.matchId));
+                    const message =
+                        `<b>Match: ${match.homeTeam} vs ${match.awayTeam}</b>\n` +
+                        `Status: ${match.status}\n` +
+                        `Market Size: ${match.marketSize}\n` +
+                        `Odds: ${oddsText}\n` +
+                        `Match ID: ${match.matchId}\n` +
+                        `Time: ${getNigeriaTime()}`;
 
-                if (newMatchesToNotify.length > 0) {
-                    console.log(`[${getNigeriaTime()}] Found ${newMatchesToNotify.length} new matches to notify (${matchesToNotify.length - newMatchesToNotify.length} already sent)`);
+                    await sendTelegramMessage(message);
 
-                    for (const match of newMatchesToNotify) {
-                        const oddsText = match.odds.home && match.odds.draw && match.odds.away
-                            ? `Home: ${match.odds.home} | Draw: ${match.odds.draw} | Away: ${match.odds.away}`
-                            : 'No odds available';
+                    // Mark as sent after successful send
+                    markMatchAsSent(match.matchId);
 
-                        const message =
-                            `<b>Match: ${match.homeTeam} vs ${match.awayTeam}</b>\n` +
-                            `Status: ${match.status}\n` +
-                            `Market Size: ${match.marketSize}\n` +
-                            `Odds: ${oddsText}\n` +
-                            `Match ID: ${match.matchId}\n` +
-                            `Time: ${getNigeriaTime()}`;
-
-                        await sendTelegramMessage(message);
-
-                        // Mark as sent after successful send
-                        markMatchAsSent(match.matchId);
-
-                        // Small delay to avoid rate limiting
-                        await new Promise(resolve => setTimeout(resolve, 200));
-                    }
+                    // Small delay to avoid rate limiting
+                    await new Promise(resolve => setTimeout(resolve, 200));
                 }
-            }
-
-            // Send notifications for in-progress matches
-            if (inProgressMatches.length > 0) {
-                let newInProgressMatches = inProgressMatches.filter(match => !isMatchAlreadySent(match.matchId));
-
-                if (newInProgressMatches.length > 0) {
-                    console.log(`[${getNigeriaTime()}] Found ${newInProgressMatches.length} new in-progress matches to notify (${inProgressMatches.length - newInProgressMatches.length} already sent)`);
-
-                    for (const match of newInProgressMatches) {
-                        const oddsText = match.odds.home && match.odds.draw && match.odds.away
-                            ? `Home: ${match.odds.home} | Draw: ${match.odds.draw} | Away: ${match.odds.away}`
-                            : 'No odds available';
-
-                        const labelsText = match.labels.length > 0 ? `Labels: ${match.labels.join(', ')}` : '';
-
-                        let message =
-                            `<b>Live: ${match.homeTeam} ${match.homeScore} - ${match.awayScore} ${match.awayTeam}</b>\n` +
-                            `Time: ${match.time} | Status: ${match.status}\n` +
-                            `Market Size: ${match.marketSize}\n` +
-                            `Odds: ${oddsText}\n`;
-
-                        if (labelsText) message += `${labelsText}\n`;
-                        message += `Match ID: ${match.matchId}\n`;
-                        message += `Time: ${getNigeriaTime()}`;
-
-                        await sendTelegramMessage(message);
-
-                        // Mark as sent after successful send
-                        markMatchAsSent(match.matchId);
-
-                        // Small delay to avoid rate limiting
-                        await new Promise(resolve => setTimeout(resolve, 200));
-                    }
-                }
-            }
-            // Send notifications for new matches
-            if (newMatches.length > 0) {
-                let brandNewMatches = newMatches.filter(match => !isMatchAlreadySent(match.matchId));
-
-                if (brandNewMatches.length > 0) {
-                    console.log(`[${getNigeriaTime()}] Found ${brandNewMatches.length} brand new matches to notify (${newMatches.length - brandNewMatches.length} already sent)`);
-
-                    for (const match of brandNewMatches) {
-                        const oddsText = match.odds.home && match.odds.draw && match.odds.away
-                            ? `Home: ${match.odds.home} | Draw: ${match.odds.draw} | Away: ${match.odds.away}`
-                            : 'No odds available';
-
-                        const message =
-                            `<b>New Match: ${match.homeTeam} vs ${match.awayTeam}</b>\n` +
-                            `Status: ${match.status}\n` +
-                            `Time: ${match.time || 'Not started'}\n` +
-                            `Odds: ${oddsText}\n` +
-                            `Match ID: ${match.matchId}\n` +
-                            `Time: ${getNigeriaTime()}`;
-
-                        await sendTelegramMessage(message);
-
-                        // Mark as sent after successful send
-                        markMatchAsSent(match.matchId);
-
-                        // Small delay to avoid rate limiting
-                        await new Promise(resolve => setTimeout(resolve, 200));
-                    }
-                }
-            }
-
-            // Send a summary notification
-            if (matchesToNotify.length > 0 || inProgressMatches.length > 0 || newMatches.length > 0) {
-                console.log(`[${getNigeriaTime()}] Sent notifications for ${matchesToNotify.length + inProgressMatches.length + newMatches.length} matches`);
             } else {
                 console.log(`[${getNigeriaTime()}] No new matches to notify`);
             }
-
-            // Update previous matches for next comparison
-            previousMatches = currentMatches;
 
             console.log(`[${getNigeriaTime()}] Run #${runCount} completed successfully!`);
             console.log(`[${getNigeriaTime()}] Total matches: ${currentMatches.length}`);
